@@ -5,9 +5,11 @@ const { nanoid } = require('nanoid');
 
 const app = express();
 const server = http.createServer(app);
+
+// Configuración de CORS más explícita
 const io = new Server(server, {
   cors: {
-    origin: "*", // Idealmente, la URL de tu Netlify
+    origin: "*", // Permite conexiones desde cualquier origen
     methods: ["GET", "POST"]
   }
 });
@@ -16,9 +18,18 @@ const rooms = {};
 const gridSize = 20;
 
 io.on('connection', (socket) => {
-  // El host crea una sala y envía su nombre
-  socket.on('createRoom', ({ playerName }) => {
-    const roomId = nanoid(5); 
+  console.log(`[CONEXIÓN] Usuario conectado: ${socket.id}`);
+
+  socket.on('createRoom', (data) => {
+    // Comprobación de seguridad para evitar crasheos
+    if (!data || !data.playerName) {
+      console.log(`[ERROR] Intento de crear sala sin datos de jugador desde ${socket.id}`);
+      return;
+    }
+    const { playerName } = data;
+    const roomId = nanoid(5);
+    console.log(`[SALA CREADA] Jugador ${playerName} (${socket.id}) ha creado la sala: ${roomId}`);
+    
     rooms[roomId] = {
       players: {},
       apple: generateApple(),
@@ -30,92 +41,77 @@ io.on('connection', (socket) => {
     socket.emit('roomCreated', { roomId, players: rooms[roomId].players, hostId: rooms[roomId].host });
   });
 
-  // Un jugador se une con su nombre
-  socket.on('joinRoom', ({ roomId, playerName }) => {
-    if (rooms[roomId]) {
-      if (rooms[roomId].gameState === 'playing') {
+  socket.on('joinRoom', (data) => {
+    if (!data || !data.playerName || !data.roomId) {
+      console.log(`[ERROR] Intento de unirse a sala sin datos completos desde ${socket.id}`);
+      return;
+    }
+    const { roomId, playerName } = data;
+    const room = rooms[roomId];
+
+    if (room) {
+      if (room.gameState === 'playing') {
         socket.emit('error', 'La partida ya ha comenzado.');
         return;
       }
+      console.log(`[UNIÓN A SALA] Jugador ${playerName} (${socket.id}) se unió a la sala: ${roomId}`);
       socket.join(roomId);
-      rooms[roomId].players[socket.id] = createPlayer(socket.id, playerName);
-      io.to(roomId).emit('updatePlayers', { players: rooms[roomId].players, hostId: rooms[roomId].host });
+      room.players[socket.id] = createPlayer(socket.id, playerName);
+      io.to(roomId).emit('updatePlayers', { players: room.players, hostId: room.host });
     } else {
       socket.emit('error', 'La sala no existe.');
     }
   });
   
-  // El resto del código del servidor (startGame, directionChange, disconnect) no necesita cambios...
   socket.on('startGame', (roomId) => {
-      if (rooms[roomId] && rooms[roomId].host === socket.id) {
-          rooms[roomId].gameState = 'playing';
-          io.to(roomId).emit('gameStarted', rooms[roomId]);
-          startGameInterval(roomId);
-      }
+    const room = rooms[roomId];
+    if (room && room.host === socket.id) {
+        console.log(`[PARTIDA INICIADA] La partida en la sala ${roomId} ha comenzado.`);
+        room.gameState = 'playing';
+        io.to(roomId).emit('gameStarted', room);
+        startGameInterval(roomId);
+    }
   });
 
   socket.on('directionChange', (data) => {
     const { roomId, direction } = data;
-    if (rooms[roomId] && rooms[roomId].players[socket.id]) {
-        const player = rooms[roomId].players[socket.id];
+    const room = rooms[roomId];
+    if (room && room.players[socket.id]) {
+        const player = room.players[socket.id];
         const { dx, dy } = player;
-
         if (direction === 'up' && dy === 0) { player.dx = 0; player.dy = -gridSize; }
-        if (direction === 'down' && dy === 0) { player.dx = 0; player.dy = gridSize; }
-        if (direction === 'left' && dx === 0) { player.dx = -gridSize; player.dy = 0; }
-        if (direction === 'right' && dx === 0) { player.dx = gridSize; player.dy = 0; }
+        else if (direction === 'down' && dy === 0) { player.dx = 0; player.dy = gridSize; }
+        else if (direction === 'left' && dx === 0) { player.dx = -gridSize; player.dy = 0; }
+        else if (direction === 'right' && dx === 0) { player.dx = gridSize; player.dy = 0; }
     }
   });
 
   socket.on('disconnect', () => {
+    console.log(`[DESCONEXIÓN] Usuario desconectado: ${socket.id}`);
     for (const roomId in rooms) {
       if (rooms[roomId].players[socket.id]) {
+        console.log(`[JUGADOR ELIMINADO] Jugador ${rooms[roomId].players[socket.id].name} eliminado de la sala ${roomId}`);
         delete rooms[roomId].players[socket.id];
         if (rooms[roomId].host === socket.id) {
+            console.log(`[HOST DESCONECTADO] El host ha salido. Cerrando sala ${roomId}.`);
             io.to(roomId).emit('error', 'El host se ha desconectado. Fin de la partida.');
             delete rooms[roomId];
         } else {
             io.to(roomId).emit('updatePlayers', { players: rooms[roomId].players, hostId: rooms[roomId].host });
         }
-        break;
+        return;
       }
     }
   });
 });
 
-// Función createPlayer ahora acepta un nombre
 function createPlayer(id, name) {
     const safeName = (name || 'Anónimo').trim().slice(0, 12);
-    return {
-        id: id,
-        name: safeName, // Se guarda el nombre
-        body: [{ x: Math.floor(Math.random() * 30) * gridSize, y: Math.floor(Math.random() * 30) * gridSize }],
-        dx: gridSize,
-        dy: 0,
-        score: 0,
-        color: `hsl(${Math.random() * 360}, 90%, 70%)`
-    };
+    return { id, name, body: [{ x: Math.floor(Math.random() * 30) * gridSize, y: Math.floor(Math.random() * 30) * gridSize }], dx: 0, dy: 0, score: 0, color: `hsl(${Math.random() * 360}, 90%, 70%)`};
 }
 
-// El resto de las funciones (generateApple, startGameInterval, etc.) se mantienen igual
 function generateApple() {
-    return {
-        x: Math.floor(Math.random() * 30) * gridSize,
-        y: Math.floor(Math.random() * 30) * gridSize,
-    };
-}
-
-function startGameInterval(roomId) {
-    const intervalId = setInterval(() => {
-        const room = rooms[roomId];
-        if (!room || Object.keys(room.players).length === 0) {
-            clearInterval(intervalId);
-            delete rooms[roomId];
-            return;
-        }
-        updateGameState(roomId);
-        io.to(roomId).emit('gameStateUpdate', { players: room.players, apple: room.apple });
-    }, 120);
+    return { x: Math.floor(Math.random() * 30) * gridSize, y: Math.floor(Math.random() * 30) * gridSize };
 }
 
 function updateGameState(roomId) {
@@ -124,6 +120,7 @@ function updateGameState(roomId) {
     const playersToDelete = [];
     for (const id in room.players) {
         const player = room.players[id];
+        if (player.dx === 0 && player.dy === 0) continue; // No mover si no se ha movido
         const head = { x: player.body[0].x + player.dx, y: player.body[0].y + player.dy };
         player.body.unshift(head);
         const dist = Math.sqrt(Math.pow(head.x - room.apple.x, 2) + Math.pow(head.y - room.apple.y, 2));
@@ -138,6 +135,7 @@ function updateGameState(roomId) {
         }
     }
     playersToDelete.forEach(id => {
+        console.log(`[JUGADOR ELIMINADO] Jugador ${room.players[id].name} ha chocado.`);
         delete room.players[id];
         io.to(roomId).emit('playerEliminated', { playerId: id, remainingPlayers: room.players });
     });
@@ -154,5 +152,22 @@ function checkCollision(head, playerId, players) {
     return false;
 }
 
+function startGameInterval(roomId) {
+    const room = rooms[roomId];
+    if (!room) return;
+    // Iniciar movimiento solo para el host al principio
+    room.players[room.host].dx = gridSize;
+
+    const intervalId = setInterval(() => {
+        if (!rooms[roomId] || Object.keys(rooms[roomId].players).length === 0) {
+            console.log(`[FIN DE PARTIDA] Sala ${roomId} vacía. Deteniendo bucle de juego.`);
+            clearInterval(intervalId);
+            return;
+        }
+        updateGameState(roomId);
+        io.to(roomId).emit('gameStateUpdate', rooms[roomId]);
+    }, 120);
+}
+
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Servidor escuchando en el puerto ${PORT}`));
+server.listen(PORT, () => console.log(`[SERVIDOR] Escuchando en el puerto ${PORT}`));
