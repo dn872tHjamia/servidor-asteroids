@@ -4,9 +4,15 @@ const { WebSocketServer } = require('ws');
 const wss = new WebSocketServer({ port: process.env.PORT || 8080 });
 
 const rooms = {};
-const TICK_RATE = 1000 / 30; // 30 actualizaciones por segundo
+const TICK_RATE = 1000 / 30; // 30 updates per second
 const SHIP_SIZE = 15, FRICTION = 0.99, ENEMY_SPEED = 1.5, POINTS_PER_ENEMY = 500;
 const PLAYER_COLORS = ['#0f0', '#0af', '#f80', '#f0f'];
+const ORB_TYPES = [
+    { type: 'green', duration: 300, rarity: 0.1 }, { type: 'red', duration: 420, rarity: 0.2 },
+    { type: 'blue', duration: 300, rarity: 0.2 }, { type: 'yellow', duration: 300, rarity: 0.2 },
+    { type: 'purple', duration: 300, rarity: 0.15 }, { type: 'orange', duration: 300, rarity: 0.2 },
+    { type: 'rainbow', duration: 0, rarity: 0.05 },
+];
 
 function createInitialGameState(mode) {
     const initialState = {
@@ -14,11 +20,12 @@ function createInitialGameState(mode) {
         gameMode: mode, inProgress: false, gameOver: false,
     };
     if (mode === 'pvp') {
-        initialState.matchTime = 2.5 * 60 * 30; // en frames
+        initialState.matchTime = 2.5 * 60 * 30; // 2:30 minutes in frames
         initialState.orbSpawnTimer = 150;
     } else { // coop
         initialState.score = 0;
         initialState.lives = 3;
+        initialState.level = 1;
     }
     return initialState;
 }
@@ -27,17 +34,18 @@ function updateRoom(room) {
     const { gameState } = room;
     if (!gameState.inProgress || gameState.gameOver) return;
 
-    // Lógica de movimiento de jugadores
+    // Player movement
     for (const id in gameState.players) {
         const p = gameState.players[id];
         if (p.invincible > 0) p.invincible--;
         if (p.powerUp.duration > 0) p.powerUp.duration--;
         if (p.keys.thrust) { p.vx += Math.cos(p.angle) * 0.15; p.vy += Math.sin(p.angle) * 0.15; }
         if (p.keys.reverse) { p.vx -= Math.cos(p.angle) * 0.08; p.vy -= Math.sin(p.angle) * 0.08; }
-
+        
         const isBig = p.powerUp.type === 'green' && p.powerUp.duration > 0;
         p.size = isBig ? SHIP_SIZE * 1.5 : SHIP_SIZE;
         let bulletSize = isBig ? 8 : 4;
+
         if (p.keys.shoot && p.shootCooldown <= 0) {
             p.shootCooldown = 15;
             const fire = (angleOffset = 0) => gameState.bullets.push({ x: p.x + Math.cos(p.angle + angleOffset) * p.size, y: p.y + Math.sin(p.angle + angleOffset) * p.size, vx: p.vx + Math.cos(p.angle + angleOffset) * 8, vy: p.vy + Math.sin(p.angle + angleOffset) * 8, life: 60, owner: id, size: bulletSize});
@@ -46,39 +54,32 @@ function updateRoom(room) {
         }
         if (p.shootCooldown > 0) p.shootCooldown--;
         p.vx *= FRICTION; p.vy *= FRICTION;
-        p.x = (p.x + p.vx < 0) ? p.x + p.vx + 1200 : (p.x + p.vx > 1200) ? p.x + p.vx - 1200 : p.x + p.vx;
-        p.y = (p.y + p.vy < 0) ? p.y + p.vy + 800 : (p.y + p.vy > 800) ? p.y + p.vy - 800 : p.y + p.vy;
+        const wrap = (val, max) => (val < 0) ? val + max : (val > max) ? val - max : val;
+        p.x = wrap(p.x + p.vx, 1200);
+        p.y = wrap(p.y + p.vy, 800);
     }
     
-    // Lógica específica de cada modo de juego
+    // Game mode specific logic
     if (gameState.gameMode === 'pvp') {
-        gameState.matchTime--;
-        gameState.orbSpawnTimer--;
-        if (gameState.orbSpawnTimer <= 0) { spawnOrb(gameState); gameState.orbSpawnTimer = 240 + Math.random() * 120; }
-        if (gameState.matchTime <= 0) gameState.gameOver = true;
+        if (gameState.matchTime-- <= 0) gameState.gameOver = true;
+        if (gameState.orbSpawnTimer-- <= 0) { spawnOrb(gameState); gameState.orbSpawnTimer = 240 + Math.random() * 120; }
         handlePvpCollisions(gameState);
     } else { // coop
-        // Lógica de asteroides y enemigos (si se quisiera implementar)
+        handleCoopLogic(gameState);
     }
 
-    gameState.bullets = gameState.bullets.filter(b => b.life-- > 0);
+    gameState.bullets = gameState.bullets.filter(b => --b.life > 0);
     const message = JSON.stringify({ type: 'state', payload: { state: gameState } });
     room.clients.forEach(c => c.ws.send(message));
 }
 
 function spawnOrb(gameState) {
-    const ORB_TYPES = [
-        { type: 'green', rarity: 0.1 }, { type: 'red', rarity: 0.2 }, { type: 'blue', rarity: 0.2 },
-        { type: 'yellow', rarity: 0.2 }, { type: 'purple', rarity: 0.15 }, { type: 'orange', rarity: 0.2 },
-        { type: 'rainbow', rarity: 0.05 },
-    ];
     let rand = Math.random();
     const orbType = ORB_TYPES.find(o => (rand -= o.rarity) < 0) || ORB_TYPES[0];
-    gameState.orbs.push({ x: Math.random()*(1200*.8)+(1200*.1), y: Math.random()*(800*.8)+(800*.1), r: 10, type: orbType.type, id: Date.now()+Math.random()});
+    gameState.orbs.push({ x: Math.random()*1100+50, y: Math.random()*700+50, r: 10, type: orbType.type, id: Date.now()+Math.random()});
 }
 
 function handlePvpCollisions(gameState) {
-    // Orbes
     for (const id in gameState.players) {
         const p = gameState.players[id];
         for (let i = gameState.orbs.length - 1; i >= 0; i--) {
@@ -93,7 +94,6 @@ function handlePvpCollisions(gameState) {
             }
         }
     }
-    // Balas vs Jugadores
     for (let i = gameState.bullets.length - 1; i >= 0; i--) {
         const b = gameState.bullets[i];
         let bulletRemoved = false;
@@ -120,7 +120,6 @@ function handlePvpCollisions(gameState) {
         }
         if(bulletRemoved) continue;
     }
-    // Auras de Poder
     const players = Object.values(gameState.players);
     for(let i = 0; i < players.length; i++) {
         const p1 = players[i];
@@ -140,59 +139,57 @@ function handlePvpCollisions(gameState) {
     }
 }
 
+function handleCoopLogic(gameState) { /* Lógica del modo cooperativo iría aquí */ }
 
 wss.on('connection', ws => {
     ws.id = Math.random().toString(36).substr(2, 9);
-
     ws.on('message', message => {
-        const { type, payload } = JSON.parse(message);
-
-        if (type === 'create') {
-            let roomCode;
-            do { roomCode = Math.random().toString(36).substring(2, 7).toUpperCase(); } while (rooms[roomCode]);
-            const client = { ws, id: ws.id };
-            rooms[roomCode] = { clients: [client], gameState: createInitialGameState(payload.gameMode), gameLoopInterval: null };
-            ws.roomCode = roomCode;
-            ws.send(JSON.stringify({ type: 'roomCreated', payload: { roomCode, playerId: ws.id } }));
-        } 
-        else if (type === 'join') {
-            const { roomCode } = payload;
-            const room = rooms[roomCode];
-            const maxPlayers = room?.gameState.gameMode === 'pvp' ? 4 : 2;
-            if (room && room.clients.length < maxPlayers) {
+        try {
+            const { type, payload } = JSON.parse(message);
+            if (type === 'create') {
+                let roomCode;
+                do { roomCode = Math.random().toString(36).substring(2, 7).toUpperCase(); } while (rooms[roomCode]);
                 const client = { ws, id: ws.id };
-                room.clients.push(client);
+                rooms[roomCode] = { clients: [client], gameState: createInitialGameState(payload.gameMode), gameLoopInterval: null };
                 ws.roomCode = roomCode;
-                ws.send(JSON.stringify({ type: 'joinedRoom', payload: { roomCode, playerId: ws.id } }));
-                const currentPlayers = room.clients.map(c => ({id: c.id, isHost: c.id === room.clients[0].id }));
-                const message = JSON.stringify({ type: 'updatePlayers', payload: { players: currentPlayers } });
-                room.clients.forEach(c => c.ws.send(message));
-            } else {
-                ws.send(JSON.stringify({ type: 'error', payload: 'La sala no existe o está llena.' }));
+                ws.send(JSON.stringify({ type: 'roomCreated', payload: { roomCode, playerId: ws.id, players: [{id: ws.id, isHost: true}] } }));
+            } 
+            else if (type === 'join') {
+                const { roomCode } = payload;
+                const room = rooms[roomCode];
+                if (!room) { ws.send(JSON.stringify({ type: 'error', payload: 'La sala no existe.' })); return; }
+                const maxPlayers = room.gameState.gameMode === 'pvp' ? 4 : 2;
+                if (room.clients.length < maxPlayers) {
+                    const client = { ws, id: ws.id };
+                    room.clients.push(client);
+                    ws.roomCode = roomCode;
+                    ws.send(JSON.stringify({ type: 'joinedRoom', payload: { roomCode, playerId: ws.id } }));
+                    const currentPlayers = room.clients.map((c, i) => ({id: c.id, isHost: i === 0 }));
+                    const message = JSON.stringify({ type: 'updatePlayers', payload: { players: currentPlayers } });
+                    room.clients.forEach(c => c.ws.send(message));
+                } else { ws.send(JSON.stringify({ type: 'error', payload: 'La sala está llena.' })); }
             }
-        }
-        else if (type === 'start') {
-            const room = rooms[ws.roomCode];
-            if (room && room.clients[0].id === ws.id) {
-                room.gameState.inProgress = true;
-                const playerColors = ['#0f0', '#0af', '#f80', '#f0f'];
-                room.clients.forEach((c, index) => {
-                    room.gameState.players[c.id] = { id: c.id, x: Math.random()*1200, y: Math.random()*800, vx:0,vy:0, angle:0, keys: {}, shootCooldown:0, invincible:180, color: playerColors[index], kills: 0, powerUp: {}, size: SHIP_SIZE };
-                });
-                room.gameLoopInterval = setInterval(() => updateRoom(room), TICK_RATE);
-                const message = JSON.stringify({ type: 'startGame', payload: { state: room.gameState } });
-                room.clients.forEach(c => c.ws.send(message));
+            else if (type === 'start') {
+                const room = rooms[ws.roomCode];
+                if (room && room.clients[0].id === ws.id) {
+                    room.gameState.inProgress = true;
+                    room.clients.forEach((c, index) => {
+                        room.gameState.players[c.id] = { id: c.id, x: Math.random()*1200, y: Math.random()*800, vx:0,vy:0, angle:0, keys: {}, shootCooldown:0, invincible:180, color: PLAYER_COLORS[index], kills: 0, powerUp: {}, size: SHIP_SIZE };
+                    });
+                    room.gameLoopInterval = setInterval(() => updateRoom(room), TICK_RATE);
+                    const message = JSON.stringify({ type: 'startGame', payload: { state: room.gameState } });
+                    room.clients.forEach(c => c.ws.send(message));
+                }
             }
-        }
-        else if (type === 'input') {
-            const room = rooms[ws.roomCode];
-            if(room && room.gameState.players[ws.id]) {
-                room.gameState.players[ws.id].keys = payload.keys;
-                room.gameState.players[ws.id].angle = payload.angle;
+            else if (type === 'input') {
+                const room = rooms[ws.roomCode];
+                if(room && room.gameState.players[ws.id]) {
+                    room.gameState.players[ws.id].keys = payload.keys;
+                    room.gameState.players[ws.id].angle = payload.angle;
+                }
             }
-        }
+        } catch (error) { console.error("Mensaje inválido:", error); }
     });
-
     ws.on('close', () => {
         const room = rooms[ws.roomCode];
         if (room) {
@@ -202,12 +199,11 @@ wss.on('connection', ws => {
                 delete rooms[ws.roomCode];
             } else {
                 delete room.gameState.players[ws.id];
-                const currentPlayers = room.clients.map(c => ({id: c.id, isHost: c.id === room.clients[0].id }));
+                const currentPlayers = room.clients.map((c, i) => ({id: c.id, isHost: i === 0 }));
                 const message = JSON.stringify({ type: 'updatePlayers', payload: { players: currentPlayers } });
                 room.clients.forEach(c => c.ws.send(message));
             }
         }
     });
 });
-
-console.log('Servidor de Asteroids iniciado.');
+console.log('Servidor de Asteroids Final iniciado.');

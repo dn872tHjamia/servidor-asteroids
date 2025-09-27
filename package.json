@@ -1,7 +1,7 @@
 {
   "name": "asteroids-server-final",
   "version": "1.0.0",
-  "description": "Servidor final para Asteroids Online",
+  "description": "Servidor final para Asteroids Online con todos los modos",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
