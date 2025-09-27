@@ -1,5 +1,5 @@
 {
-  "name": "asteroids-server-definitivo",
+  "name": "asteroids-server-final",
   "version": "1.0.0",
   "description": "Servidor final y completo para Asteroids Online",
   "main": "server.js",

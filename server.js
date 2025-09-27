@@ -1,12 +1,13 @@
 const { WebSocketServer } = require('ws');
 const http = require('http');
 
+// Configuración del servidor para ser compatible con Render
 const server = http.createServer();
 const wss = new WebSocketServer({ server });
 const PORT = process.env.PORT || 8080;
 
 const rooms = {};
-const TICK_RATE = 1000 / 30;
+const TICK_RATE = 1000 / 20; // 20 actualizaciones por segundo para reducir lag
 const SHIP_SIZE = 15, FRICTION = 0.99;
 const PLAYER_COLORS = ['#0f0', '#0af', '#f80', '#f0f'];
 const ORB_TYPES = [
@@ -22,8 +23,8 @@ function createInitialGameState(mode) {
         gameMode: mode, inProgress: false, gameOver: false,
     };
     if (mode === 'pvp') {
-        initialState.matchTime = 2.5 * 60 * 30;
-        initialState.orbSpawnTimer = 150;
+        initialState.matchTime = 2.5 * 60 * 20; // Ajustado a 20 ticks/seg
+        initialState.orbSpawnTimer = 100;
     } else { // coop
         initialState.score = 0;
         initialState.lives = 3;
@@ -37,15 +38,24 @@ function updateRoom(room) {
     if (!gameState.inProgress || gameState.gameOver) return;
     const wrap = (val, max) => (val < 0) ? val + max : (val > max) ? val - max : val;
 
+    // Movimiento de Balas
+    gameState.bullets.forEach(b => {
+        b.x += b.vx; b.y += b.vy;
+        b.x = wrap(b.x, 1200); b.y = wrap(b.y, 800);
+    });
+
+    // Movimiento de Jugadores
     for (const id in gameState.players) {
         const p = gameState.players[id];
         if (p.invincible > 0) p.invincible--;
         if (p.powerUp.duration > 0) p.powerUp.duration--;
         if (p.keys.thrust) { p.vx += Math.cos(p.angle) * 0.15; p.vy += Math.sin(p.angle) * 0.15; }
         if (p.keys.reverse) { p.vx -= Math.cos(p.angle) * 0.08; p.vy -= Math.sin(p.angle) * 0.08; }
+        
         const isBig = p.powerUp.type === 'green' && p.powerUp.duration > 0;
         p.size = isBig ? SHIP_SIZE * 1.5 : SHIP_SIZE;
         let bulletSize = isBig ? 8 : 4;
+
         if (p.keys.shoot && p.shootCooldown <= 0) {
             p.shootCooldown = 15;
             const fire = (angleOffset = 0) => gameState.bullets.push({ x: p.x + Math.cos(p.angle + angleOffset) * p.size, y: p.y + Math.sin(p.angle + angleOffset) * p.size, vx: p.vx + Math.cos(p.angle + angleOffset) * 8, vy: p.vy + Math.sin(p.angle + angleOffset) * 8, life: 60, owner: id, size: bulletSize});
@@ -58,9 +68,10 @@ function updateRoom(room) {
         p.y = wrap(p.y + p.vy, 800);
     }
     
+    // Lógica específica del modo de juego
     if (gameState.gameMode === 'pvp') {
         if (gameState.matchTime-- <= 0) gameState.gameOver = true;
-        if (gameState.orbSpawnTimer-- <= 0) { spawnOrb(gameState); gameState.orbSpawnTimer = 240 + Math.random() * 120; }
+        if (gameState.orbSpawnTimer-- <= 0) { spawnOrb(gameState); gameState.orbSpawnTimer = 120 + Math.random() * 60; }
         handlePvpCollisions(gameState);
     } else { // coop
         handleCoopLogic(gameState);
@@ -249,7 +260,7 @@ wss.on('connection', ws => {
             room.clients = room.clients.filter(c => c.id !== ws.id);
             if (room.clients.length === 0) {
                 clearInterval(room.gameLoopInterval);
-                delete rooms[ws.roomCode];
+                delete rooms[roomCode];
             } else {
                 delete room.gameState.players[ws.id];
                 const currentPlayers = room.clients.map((c, i) => ({id: c.id, isHost: i === 0 }));
