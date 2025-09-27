@@ -1,10 +1,8 @@
-// ARCHIVO: server.js
 const { WebSocketServer } = require('ws');
-
 const wss = new WebSocketServer({ port: process.env.PORT || 8080 });
 
 const rooms = {};
-const TICK_RATE = 1000 / 30; // 30 updates per second
+const TICK_RATE = 1000 / 30;
 const SHIP_SIZE = 15, FRICTION = 0.99, ENEMY_SPEED = 1.5, POINTS_PER_ENEMY = 500;
 const PLAYER_COLORS = ['#0f0', '#0af', '#f80', '#f0f'];
 const ORB_TYPES = [
@@ -20,7 +18,7 @@ function createInitialGameState(mode) {
         gameMode: mode, inProgress: false, gameOver: false,
     };
     if (mode === 'pvp') {
-        initialState.matchTime = 2.5 * 60 * 30; // 2:30 minutes in frames
+        initialState.matchTime = 2.5 * 60 * 30;
         initialState.orbSpawnTimer = 150;
     } else { // coop
         initialState.score = 0;
@@ -41,11 +39,9 @@ function updateRoom(room) {
         if (p.powerUp.duration > 0) p.powerUp.duration--;
         if (p.keys.thrust) { p.vx += Math.cos(p.angle) * 0.15; p.vy += Math.sin(p.angle) * 0.15; }
         if (p.keys.reverse) { p.vx -= Math.cos(p.angle) * 0.08; p.vy -= Math.sin(p.angle) * 0.08; }
-        
         const isBig = p.powerUp.type === 'green' && p.powerUp.duration > 0;
         p.size = isBig ? SHIP_SIZE * 1.5 : SHIP_SIZE;
         let bulletSize = isBig ? 8 : 4;
-
         if (p.keys.shoot && p.shootCooldown <= 0) {
             p.shootCooldown = 15;
             const fire = (angleOffset = 0) => gameState.bullets.push({ x: p.x + Math.cos(p.angle + angleOffset) * p.size, y: p.y + Math.sin(p.angle + angleOffset) * p.size, vx: p.vx + Math.cos(p.angle + angleOffset) * 8, vy: p.vy + Math.sin(p.angle + angleOffset) * 8, life: 60, owner: id, size: bulletSize});
@@ -139,7 +135,65 @@ function handlePvpCollisions(gameState) {
     }
 }
 
-function handleCoopLogic(gameState) { /* Lógica del modo cooperativo iría aquí */ }
+function handleCoopLogic(gameState) {
+    // Asteroid Spawning
+    if (gameState.asteroids.length === 0) {
+        gameState.level++;
+        for(let i = 0; i < 3 + gameState.level; i++) spawnAsteroid(gameState);
+    }
+    // Asteroid Movement
+    gameState.asteroids.forEach(a => { a.x += a.vx; a.y += a.vy; a.rotation += a.rotationSpeed; const wrap = (v,m) => (v<0)?v+m:(v>m)?v-m:v; a.x = wrap(a.x, 1200); a.y = wrap(a.y, 800); });
+    
+    // Bullet vs Asteroid
+    for (let i = gameState.bullets.length - 1; i >= 0; i--) {
+        const b = gameState.bullets[i];
+        let bulletRemoved = false;
+        for (let j = gameState.asteroids.length - 1; j >= 0; j--) {
+            const a = gameState.asteroids[j];
+            if (Math.hypot(b.x - a.x, b.y - a.y) < a.r) {
+                gameState.bullets.splice(i, 1); bulletRemoved = true;
+                gameState.score += a.level === 0 ? 20 : (a.level === 1 ? 50 : 100);
+                if (a.level < 2) { spawnAsteroid(gameState, a.x, a.y, a.r / 2); spawnAsteroid(gameState, a.x, a.y, a.r / 2); }
+                gameState.asteroids.splice(j, 1); break;
+            }
+        }
+        if(bulletRemoved) continue;
+    }
+
+    // Player vs Asteroid
+    for (const id in gameState.players) {
+        const p = gameState.players[id];
+        if (p.invincible > 0) continue;
+        let playerHit = false;
+        for (const a of gameState.asteroids) {
+            if (Math.hypot(p.x - a.x, p.y - a.y) < a.r + p.size / 2) {
+                playerHit = true; break;
+            }
+        }
+        if (playerHit) {
+            p.x = 1200 / 2; p.y = 800 / 2; p.vx = 0; p.vy = 0; p.invincible = 180;
+            gameState.lives--;
+            if (gameState.lives <= 0) gameState.gameOver = true;
+        }
+    }
+}
+
+function spawnAsteroid(gameState, x, y, radius) {
+    const level = radius ? (radius < 25 ? 2 : 1) : 0;
+    const r = radius || 30 + Math.random() * 20;
+    const shape = [];
+    const segments = 12;
+    for (let i = 0; i < segments; i++) {
+        const angle = (i / segments) * Math.PI * 2;
+        const radiusOffset = 0.8 + Math.random() * 0.4;
+        shape.push({ x: Math.cos(angle) * r * radiusOffset, y: Math.sin(angle) * r * radiusOffset });
+    }
+    gameState.asteroids.push({
+        x: x || (Math.random() > 0.5 ? 0 : 1200), y: y || (Math.random() > 0.5 ? 0 : 800),
+        vx: (Math.random() - 0.5) * 2, vy: (Math.random() - 0.5) * 2,
+        r: r, level: level, shape: shape, rotation: 0, rotationSpeed: (Math.random() - 0.5) * 0.02
+    });
+}
 
 wss.on('connection', ws => {
     ws.id = Math.random().toString(36).substr(2, 9);
@@ -176,6 +230,7 @@ wss.on('connection', ws => {
                     room.clients.forEach((c, index) => {
                         room.gameState.players[c.id] = { id: c.id, x: Math.random()*1200, y: Math.random()*800, vx:0,vy:0, angle:0, keys: {}, shootCooldown:0, invincible:180, color: PLAYER_COLORS[index], kills: 0, powerUp: {}, size: SHIP_SIZE };
                     });
+                    if (room.gameState.gameMode === 'coop') { for(let i=0; i<5; i++) spawnAsteroid(room.gameState); }
                     room.gameLoopInterval = setInterval(() => updateRoom(room), TICK_RATE);
                     const message = JSON.stringify({ type: 'startGame', payload: { state: room.gameState } });
                     room.clients.forEach(c => c.ws.send(message));
@@ -206,4 +261,4 @@ wss.on('connection', ws => {
         }
     });
 });
-console.log('Servidor de Asteroids Final iniciado.');
+console.log('Servidor de Asteroids Definitivo iniciado.');
