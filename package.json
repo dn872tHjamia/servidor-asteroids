@@ -1,10 +1,10 @@
 {
-  "name": "asteroids-servidor",
+  "name": "asteroids-server-final",
   "version": "1.0.0",
-  "description": "Servidor para el juego Asteroids",
-  "main": "game-server.js",
+  "description": "Servidor final para Asteroids Online",
+  "main": "server.js",
   "scripts": {
-    "start": "node game-server.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "ws": "^8.17.0"
